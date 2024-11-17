@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -ueo pipefail
+
+location="${WEBCAM:-simonyhuette}"
+set_image=""
+last_image=""
+LIVE_WALLPAPER_FILE="/run/user/${UID:-$(id -u)}/live-wallpaper-latest.jpg"
+OFFLINE_WALLPAPER_DIR="${XDG_PICTURES_DIR:-"${HOME}/Pictures"}/wallpapers"
+
+if ! [ -d "${OFFLINE_WALLPAPER_DIR}" ]; then
+    echo "var 'OFFLINE_WALLPAPER_DIR=${OFFLINE_WALLPAPER_DIR}' not a directory"
+    false
+fi
+
+# bug I believe this is ignored at the moment
+# check `swww img --help | grep env:` for supported variables
+export SWWW_TRANSITION="${SWWW_TRANSITION:-none}"
+
+curlie() {
+	curl --user-agent "live-wallpaper/latest (+https://github.com/norpol/live-wallpaper/issues/new)" "${@}"
+}
+
+random_background() {
+	if outputs; then
+		if ! swww img \
+			"$(find "${OFFLINE_WALLPAPER_DIR}" -type f | shuf -n 1)"; then
+			echo "Random background failed"
+			swaymsg -t get_outputs
+			sleep 1m
+		fi
+	fi
+}
+
+outputs() {
+	swaymsg -t get_outputs | jq -ej '. | select(length > 0) | ""' || pgrep -a -f swaylock-plugin 2>/dev/null >/dev/null
+}
+
+while true; do
+	# skip if no outputs
+	if ! outputs; then
+		sleep 1m
+		continue
+	fi
+
+	# set random picture if server unreachable or initial run
+	if [ -z "${set_image}" ] &&
+		! curlie --connect-timeout 2 -sS -D - https://www.foto-webcam.eu/favicon.ico | grep -qs 200; then
+		random_background
+		sleep 10s
+		continue
+	fi
+
+	# wait extra if initial run
+	test -z "${set_image}" || sleep 1m
+
+	image_list='https://www.foto-webcam.eu/webcam/include/list.php?img=&wc='"${location}"'&histpos=0&ww=1345'
+
+	# skip if image fails to download
+	if ! last_image="$(curlie -qs "${image_list}" | jq -r '.uhdimg')"; then
+		sleep 10s
+		continue
+	fi
+
+	# skip if image is already most recently downloaded image
+	if ! [ "${last_image}" == "${set_image}" ]; then
+		curlie -qs -L -o "${LIVE_WALLPAPER_FILE}" "https://www.foto-webcam.eu/webcam/${location}/${last_image}" || continue
+
+		# only set image if output available
+		if outputs; then
+			# set random image if image setting fails
+			if swww img "${LIVE_WALLPAPER_FILE}"; then
+				set_image="${last_image}"
+			else
+				random_background
+				set_image=""
+				continue
+			fi
+		fi
+		sleep 5m
+	fi
+done
